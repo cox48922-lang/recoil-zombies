@@ -1,0 +1,689 @@
+local RunService  = game:GetService("RunService")
+local Players     = game:GetService("Players")
+local UIS         = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Camera      = workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+
+local cfg = {
+    skeleton       = true,
+    boxes          = true,
+    distance       = true,
+    visCheck       = true,
+
+    aimbot         = false,
+    aimbotFOV      = 300,
+    aimbotSmooth   = 0.3,
+    showFOV        = true,
+
+    hitboxExpander = false,
+    hitboxSize     = 4,
+    hitboxVisuals  = false,
+
+    skeletonColor  = Color3.fromRGB(255, 60, 60),
+    boxColor       = Color3.fromRGB(255, 60, 60),
+    distColor      = Color3.fromRGB(255, 255, 255),
+    visibleColor   = Color3.fromRGB(60, 255, 60),
+    hiddenColor    = Color3.fromRGB(255, 60, 60),
+    skeletonThick  = 1.5,
+    boxThick       = 1.5,
+    maxDist        = 500,
+}
+
+local folder = workspace:FindFirstChild("ClientZambies")
+if not folder then return end
+
+local processed       = {}
+local aimboton        = false
+local currenttarget   = nil
+local hitboxes = {}
+local tracked  = {}
+
+local c = {
+    BG     = Color3.fromRGB(13, 13, 13),
+    PANEL  = Color3.fromRGB(20, 20, 20),
+    HOVER  = Color3.fromRGB(28, 28, 28),
+    BORDER = Color3.fromRGB(38, 38, 38),
+    TEXT   = Color3.fromRGB(210, 210, 210),
+    DIM    = Color3.fromRGB(90, 90, 90),
+    WHITE  = Color3.fromRGB(255, 255, 255),
+}
+
+local function tween(obj, props, t)
+    TweenService:Create(obj, TweenInfo.new(t or 0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), props):Play()
+end
+
+local fovcircle = Drawing.new("Circle")
+fovcircle.Visible      = false
+fovcircle.Thickness    = 1
+fovcircle.Color        = Color3.fromRGB(210, 210, 210)
+fovcircle.Transparency = 1
+fovcircle.NumSides     = 64
+fovcircle.Filled       = false
+fovcircle.Radius       = cfg.aimbotFOV
+
+local bones = {
+    {"Head","UpperTorso"},
+    {"UpperTorso","LowerTorso"},
+    {"UpperTorso","LeftUpperArm"},
+    {"LeftUpperArm","LeftLowerArm"},
+    {"LeftLowerArm","LeftHand"},
+    {"UpperTorso","RightUpperArm"},
+    {"RightUpperArm","RightLowerArm"},
+    {"RightLowerArm","RightHand"},
+    {"LowerTorso","LeftUpperLeg"},
+    {"LeftUpperLeg","LeftLowerLeg"},
+    {"LeftLowerLeg","LeftFoot"},
+    {"LowerTorso","RightUpperLeg"},
+    {"RightUpperLeg","RightLowerLeg"},
+    {"RightLowerLeg","RightFoot"},
+}
+
+local function line(color, thick)
+    local l = Drawing.new("Line")
+    l.Visible = false; l.Color = color; l.Thickness = thick; l.Transparency = 1
+    return l
+end
+
+local function text(size, color)
+    local t = Drawing.new("Text")
+    t.Visible = false; t.Size = size or 13; t.Color = color or Color3.new(1,1,1)
+    t.Outline = true; t.OutlineColor = Color3.new(0,0,0); t.Font = Drawing.Fonts.UI
+    return t
+end
+
+local function w2s(pos)
+    local sp, on = Camera:WorldToViewportPoint(pos)
+    return Vector2.new(sp.X, sp.Y), on, sp.Z
+end
+
+local rayparams = RaycastParams.new()
+rayparams.FilterType  = Enum.RaycastFilterType.Blacklist
+rayparams.IgnoreWater = true
+
+local function visible(part)
+    if not cfg.visCheck then return true end
+    if not part or not part.Parent then return false end
+    local ignore = {folder}
+    if LocalPlayer.Character then table.insert(ignore, LocalPlayer.Character) end
+    local vis = workspace:FindFirstChild("Vis")
+    if vis then table.insert(ignore, vis) end
+    table.insert(ignore, Camera)
+    rayparams.FilterDescendantsInstances = ignore
+    local result = workspace:Raycast(Camera.CFrame.Position, part.Position - Camera.CFrame.Position, rayparams)
+    return result == nil
+end
+
+local function gettarget()
+    local best, bestdist = nil, math.huge
+    local sc = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    for _, zombie in ipairs(folder:GetChildren()) do
+        if not zombie:IsA("Model") then continue end
+        local candidates = {}
+        for _, p in ipairs(zombie:GetChildren()) do
+            if p.Name == "Head" and p:IsA("BasePart") then table.insert(candidates, p) end
+        end
+        if #candidates == 0 then
+            local t = zombie:FindFirstChild("UpperTorso")
+            if t and t:IsA("BasePart") then table.insert(candidates, t) end
+        end
+        for _, part in ipairs(candidates) do
+            if (part.Position - Camera.CFrame.Position).Magnitude < 10 then continue end
+            local sp, _, depth = w2s(part.Position)
+            if depth > 0 then
+                local d = (sp - sc).Magnitude
+                if d < cfg.aimbotFOV and d < bestdist then bestdist = d; best = part end
+            end
+        end
+    end
+    return best
+end
+
+local function updatevis()
+    for _, hitbox in pairs(hitboxes) do
+        if hitbox and hitbox.Parent then
+            hitbox.Transparency = cfg.hitboxVisuals and 0.7 or 1
+            hitbox.Material     = cfg.hitboxVisuals and Enum.Material.Neon or Enum.Material.Air
+            hitbox.Color        = cfg.hitboxVisuals and Color3.fromRGB(255,60,60) or Color3.new(0,0,0)
+        end
+    end
+end
+
+local function createhitbox(zombie)
+    if not zombie or not zombie.Parent or tracked[zombie] then return end
+    local torso = zombie:FindFirstChild("UpperTorso") or zombie:FindFirstChild("LowerTorso")
+    if not torso then return end
+    local hitbox = Instance.new("Part")
+    hitbox.Name          = "ExpandedHitbox_" .. zombie.Name
+    hitbox.Size          = torso.Size + Vector3.new(cfg.hitboxSize, cfg.hitboxSize, cfg.hitboxSize)
+    hitbox.CFrame        = torso.CFrame
+    hitbox.Anchored      = false
+    hitbox.CanCollide    = false
+    hitbox.TopSurface    = Enum.SurfaceType.Smooth
+    hitbox.BottomSurface = Enum.SurfaceType.Smooth
+    hitbox.Transparency  = cfg.hitboxVisuals and 0.7 or 1
+    hitbox.Material      = cfg.hitboxVisuals and Enum.Material.Neon or Enum.Material.Air
+    hitbox.Color         = cfg.hitboxVisuals and Color3.fromRGB(255,60,60) or Color3.new(0,0,0)
+    hitbox.Parent        = zombie
+    local weld = Instance.new("WeldConstraint")
+    weld.Part0 = torso; weld.Part1 = hitbox; weld.Parent = hitbox
+    hitboxes[zombie] = hitbox
+    tracked[zombie]  = true
+end
+
+local function enablehitbox()
+    for _, z in ipairs(folder:GetChildren()) do
+        if z:IsA("Model") then createhitbox(z) end
+    end
+end
+
+local function disablehitbox()
+    for _, hitbox in pairs(hitboxes) do if hitbox then hitbox:Destroy() end end
+    hitboxes = {}; tracked = {}
+end
+
+local function updatesizes()
+    for zombie, hitbox in pairs(hitboxes) do
+        if hitbox and hitbox.Parent then
+            local torso = zombie:FindFirstChild("UpperTorso") or zombie:FindFirstChild("LowerTorso")
+            if torso then hitbox.Size = torso.Size + Vector3.new(cfg.hitboxSize, cfg.hitboxSize, cfg.hitboxSize) end
+        end
+    end
+end
+
+local function setup(model)
+    if processed[model] then return end
+    processed[model] = true
+
+    local bonelines = {}
+    for _, pair in ipairs(bones) do
+        local a = model:FindFirstChild(pair[1])
+        local b = model:FindFirstChild(pair[2])
+        if a and b then table.insert(bonelines, {a=a, b=b, line=line(cfg.skeletonColor, cfg.skeletonThick)}) end
+    end
+
+    local boxlines = {}
+    for i = 1, 8 do table.insert(boxlines, line(cfg.boxColor, cfg.boxThick)) end
+    local dtext = text(11, cfg.distColor)
+
+    local function hide()
+        for _, b in ipairs(bonelines) do b.line.Visible = false end
+        for _, l in ipairs(boxlines)  do l.Visible = false end
+        dtext.Visible = false
+    end
+
+    local function cleanup()
+        for _, b in ipairs(bonelines) do b.line:Remove() end
+        for _, l in ipairs(boxlines)  do l:Remove() end
+        dtext:Remove(); processed[model] = nil
+    end
+
+    local conn
+    conn = RunService.Heartbeat:Connect(function()
+        if not model or not model.Parent then conn:Disconnect(); cleanup(); return end
+        local root = model:FindFirstChild("UpperTorso") or model:FindFirstChild("LowerTorso")
+        if not root then hide(); return end
+        local worlddist = (root.Position - Camera.CFrame.Position).Magnitude
+        if worlddist < 10 or worlddist > cfg.maxDist then hide(); return end
+        local _, _, depth = w2s(root.Position)
+        if depth <= 0 then hide(); return end
+
+        local vis  = visible(root)
+        local color = vis and cfg.visibleColor or cfg.hiddenColor
+
+        for _, bone in ipairs(bonelines) do
+            if cfg.skeleton then
+                local sa, _, da = w2s(bone.a.Position)
+                local sb        = w2s(bone.b.Position)
+                bone.line.Color = color; bone.line.From = sa; bone.line.To = sb; bone.line.Visible = da > 0
+            else bone.line.Visible = false end
+        end
+
+        local head  = model:FindFirstChild("Head")
+        local lfoot = model:FindFirstChild("LeftFoot")
+        local rfoot = model:FindFirstChild("RightFoot")
+        local foot  = lfoot or rfoot
+
+        if head and foot then
+            local headpart = nil
+            for _, p in ipairs(model:GetChildren()) do
+                if p.Name == "Head" and p:IsA("BasePart") then headpart = p; break end
+            end
+            headpart = headpart or head
+            local toppos = headpart.Position + Vector3.new(0, headpart.Size.Y / 2, 0)
+            local botpos = foot.Position     - Vector3.new(0, foot.Size.Y      / 2, 0)
+            local tops, _, dtop = w2s(toppos)
+            local bots, _, dbot = w2s(botpos)
+
+            if dtop > 0 and dbot > 0 then
+                local bh = bots.Y - tops.Y
+                local bw = bh * 0.4
+                local cx = tops.X
+                local bx = cx - bw * 0.5
+                local by = tops.Y
+                local tw = bw * 0.28
+                local th  = bh * 0.22
+
+                if cfg.boxes then
+                    local pts = {
+                        {Vector2.new(bx,by),       Vector2.new(bx+tw,by)},
+                        {Vector2.new(bx,by),       Vector2.new(bx,by+th)},
+                        {Vector2.new(bx+bw,by),    Vector2.new(bx+bw-tw,by)},
+                        {Vector2.new(bx+bw,by),    Vector2.new(bx+bw,by+th)},
+                        {Vector2.new(bx,by+bh),    Vector2.new(bx+tw,by+bh)},
+                        {Vector2.new(bx,by+bh),    Vector2.new(bx,by+bh-th)},
+                        {Vector2.new(bx+bw,by+bh), Vector2.new(bx+bw-tw,by+bh)},
+                        {Vector2.new(bx+bw,by+bh), Vector2.new(bx+bw,by+bh-th)},
+                    }
+                    for i, p in ipairs(pts) do
+                        boxlines[i].Color = color; boxlines[i].From = p[1]; boxlines[i].To = p[2]; boxlines[i].Visible = true
+                    end
+                else
+                    for _, l in ipairs(boxlines) do l.Visible = false end
+                end
+
+                if cfg.distance then
+                    local label = math.floor(worlddist) .. "m"
+                    dtext.Text = label; dtext.Color = color
+                    dtext.Position = Vector2.new(cx - (#label * 3.2), by + bh + 3)
+                    dtext.Visible = true
+                else dtext.Visible = false end
+            else
+                for _, l in ipairs(boxlines) do l.Visible = false end
+                dtext.Visible = false
+            end
+        else
+            for _, l in ipairs(boxlines) do l.Visible = false end
+            dtext.Visible = false
+        end
+    end)
+
+    model.AncestryChanged:Connect(function(_, parent)
+        if not parent then conn:Disconnect(); cleanup() end
+    end)
+end
+
+for _, child in ipairs(folder:GetChildren()) do
+    if child:IsA("Model") then setup(child) end
+end
+folder.ChildAdded:Connect(function(child)
+    if child:IsA("Model") then
+        task.wait(0.1); setup(child)
+        if cfg.hitboxExpander then createhitbox(child) end
+    end
+end)
+folder.ChildRemoved:Connect(function(child)
+    if child:IsA("Model") and hitboxes[child] then
+        if hitboxes[child] then hitboxes[child]:Destroy() end
+        hitboxes[child] = nil; tracked[child] = nil
+    end
+end)
+
+RunService.RenderStepped:Connect(function()
+    local sc = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    if cfg.showFOV then
+        fovcircle.Visible  = true
+        fovcircle.Radius   = cfg.aimbotFOV
+        fovcircle.Position = sc
+        fovcircle.Color    = (cfg.aimbot and aimboton) and Color3.fromRGB(60,255,60) or Color3.fromRGB(210,210,210)
+    else
+        fovcircle.Visible = false
+    end
+    if cfg.aimbot and aimboton then
+        local target = gettarget()
+        if target then
+            currenttarget = target
+            local campos = Camera.CFrame.Position
+            local dir    = (target.Position - campos).Unit
+            Camera.CFrame = Camera.CFrame:Lerp(CFrame.new(campos, campos + dir), cfg.aimbotSmooth)
+        else currenttarget = nil end
+    else currenttarget = nil end
+end)
+
+UIS.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton2 and cfg.aimbot then aimboton = true end
+end)
+UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then aimboton = false; currenttarget = nil end
+end)
+
+local coregui = game:GetService("CoreGui")
+if coregui:FindFirstChild("ZambieUI") then coregui.ZambieUI:Destroy() end
+
+local gui = Instance.new("ScreenGui")
+gui.Name           = "ZambieUI"
+gui.ResetOnSpawn   = false
+gui.IgnoreGuiInset = true
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent         = coregui
+
+local win = Instance.new("Frame")
+win.Size            = UDim2.fromOffset(420, 280)
+win.Position        = UDim2.fromScale(0.5, 0.5)
+win.AnchorPoint     = Vector2.new(0.5, 0.5)
+win.BackgroundColor3 = c.BG
+win.BorderSizePixel = 0
+win.ClipsDescendants = true
+win.Parent          = gui
+Instance.new("UICorner", win).CornerRadius = UDim.new(0, 8)
+local winstroke = Instance.new("UIStroke")
+winstroke.Color     = c.BORDER
+winstroke.Thickness = 1
+winstroke.Parent    = win
+
+local bar = Instance.new("Frame")
+bar.Size             = UDim2.new(1, 0, 0, 38)
+bar.BackgroundColor3 = c.PANEL
+bar.BorderSizePixel  = 0
+bar.Parent           = win
+
+local barline = Instance.new("Frame")
+barline.Size             = UDim2.new(1, 0, 0, 1)
+barline.Position         = UDim2.new(0, 0, 1, -1)
+barline.BackgroundColor3 = c.BORDER
+barline.BorderSizePixel  = 0
+barline.Parent           = bar
+
+local titletxt = Instance.new("TextLabel")
+titletxt.Size                = UDim2.new(1, -80, 1, 0)
+titletxt.Position            = UDim2.fromOffset(14, 0)
+titletxt.BackgroundTransparency = 1
+titletxt.Text                = "recoil zombies"
+titletxt.TextColor3          = c.TEXT
+titletxt.TextSize            = 12
+titletxt.Font                = Enum.Font.GothamBold
+titletxt.TextXAlignment      = Enum.TextXAlignment.Left
+titletxt.Parent              = bar
+
+local closebtn = Instance.new("TextButton")
+closebtn.Size             = UDim2.fromOffset(14, 14)
+closebtn.Position         = UDim2.new(1, -24, 0.5, -7)
+closebtn.BackgroundColor3 = c.BORDER
+closebtn.Text             = ""
+closebtn.BorderSizePixel  = 0
+closebtn.Parent           = bar
+Instance.new("UICorner", closebtn).CornerRadius = UDim.new(1, 0)
+closebtn.MouseEnter:Connect(function() tween(closebtn, {BackgroundColor3 = Color3.fromRGB(180,60,60)}, 0.12) end)
+closebtn.MouseLeave:Connect(function() tween(closebtn, {BackgroundColor3 = c.BORDER}, 0.12) end)
+closebtn.MouseButton1Click:Connect(function()
+    tween(win, {Size = UDim2.fromOffset(0,0), BackgroundTransparency = 1}, 0.22)
+    task.wait(0.25); gui:Destroy()
+end)
+
+do
+    local drag, ds, dp
+    bar.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then
+            drag = true; ds = i.Position; dp = win.Position
+        end
+    end)
+    UIS.InputChanged:Connect(function(i)
+        if drag and i.UserInputType == Enum.UserInputType.MouseMovement then
+            local d = i.Position - ds
+            win.Position = UDim2.new(dp.X.Scale, dp.X.Offset + d.X, dp.Y.Scale, dp.Y.Offset + d.Y)
+        end
+    end)
+    UIS.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then drag = false end
+    end)
+end
+
+local side = Instance.new("Frame")
+side.Size             = UDim2.new(0, 90, 1, -38)
+side.Position         = UDim2.fromOffset(0, 38)
+side.BackgroundColor3 = c.PANEL
+side.BorderSizePixel  = 0
+side.Parent           = win
+
+local sideline = Instance.new("Frame")
+sideline.Size             = UDim2.new(0, 1, 1, -38)
+sideline.Position         = UDim2.fromOffset(90, 38)
+sideline.BackgroundColor3 = c.BORDER
+sideline.BorderSizePixel  = 0
+sideline.Parent           = win
+
+local sidelayout = Instance.new("UIListLayout")
+sidelayout.SortOrder = Enum.SortOrder.LayoutOrder
+sidelayout.Padding   = UDim.new(0, 1)
+sidelayout.Parent    = side
+
+local sidepad = Instance.new("UIPadding")
+sidepad.PaddingTop   = UDim.new(0, 8)
+sidepad.PaddingLeft  = UDim.new(0, 6)
+sidepad.PaddingRight = UDim.new(0, 6)
+sidepad.Parent       = side
+
+local content = Instance.new("Frame")
+content.Size                = UDim2.new(1, -90, 1, -38)
+content.Position            = UDim2.fromOffset(90, 38)
+content.BackgroundTransparency = 1
+content.ClipsDescendants    = true
+content.Parent              = win
+
+local activetab = nil
+
+local function tab(name, order)
+    local t = {}
+    local btn = Instance.new("TextButton")
+    btn.Size                = UDim2.new(1, 0, 0, 30)
+    btn.BackgroundColor3    = c.PANEL
+    btn.BackgroundTransparency = 1
+    btn.Text                = name
+    btn.TextColor3          = c.DIM
+    btn.TextSize            = 11
+    btn.Font                = Enum.Font.Gotham
+    btn.BorderSizePixel     = 0
+    btn.LayoutOrder         = order
+    btn.Parent              = side
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
+
+    local page = Instance.new("ScrollingFrame")
+    page.Size                = UDim2.fromScale(1, 1)
+    page.BackgroundTransparency = 1
+    page.Visible             = false
+    page.ScrollBarThickness  = 3
+    page.ScrollBarImageColor3 = Color3.fromRGB(80,80,80)
+    page.CanvasSize          = UDim2.new(0,0,0,0)
+    page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    page.BorderSizePixel     = 0
+    page.Parent              = content
+
+    local pl = Instance.new("UIListLayout")
+    pl.SortOrder = Enum.SortOrder.LayoutOrder
+    pl.Padding   = UDim.new(0, 6)
+    pl.Parent    = page
+
+    local pp = Instance.new("UIPadding")
+    pp.PaddingTop    = UDim.new(0, 12)
+    pp.PaddingLeft   = UDim.new(0, 12)
+    pp.PaddingRight  = UDim.new(0, 12)
+    pp.PaddingBottom = UDim.new(0, 12)
+    pp.Parent        = page
+
+    t.btn  = btn
+    t.page = page
+
+    local function on()
+        if activetab and activetab ~= t then
+            tween(activetab.btn, {TextColor3 = c.DIM, BackgroundTransparency = 1}, 0.15)
+            activetab.page.Visible = false
+        end
+        activetab = t
+        tween(btn, {TextColor3 = c.TEXT, BackgroundTransparency = 0.92}, 0.15)
+        page.Visible = true
+    end
+
+    btn.MouseButton1Click:Connect(on)
+    btn.MouseEnter:Connect(function() if activetab ~= t then tween(btn, {BackgroundTransparency = 0.96}, 0.12) end end)
+    btn.MouseLeave:Connect(function() if activetab ~= t then tween(btn, {BackgroundTransparency = 1}, 0.12) end end)
+    t.activate = on
+    return t
+end
+
+local function toggle(parent, label, key, callback)
+    local state = cfg[key]
+
+    local row = Instance.new("Frame")
+    row.Size             = UDim2.new(1, 0, 0, 32)
+    row.BackgroundColor3 = c.PANEL
+    row.BorderSizePixel  = 0
+    row.Parent           = parent
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 5)
+    local rs = Instance.new("UIStroke")
+    rs.Color = c.BORDER; rs.Thickness = 1; rs.Parent = row
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size                = UDim2.new(1, -50, 1, 0)
+    lbl.Position            = UDim2.fromOffset(10, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text                = label
+    lbl.TextColor3          = c.TEXT
+    lbl.TextSize            = 11
+    lbl.Font                = Enum.Font.Gotham
+    lbl.TextXAlignment      = Enum.TextXAlignment.Left
+    lbl.Parent              = row
+
+    local track = Instance.new("Frame")
+    track.Size             = UDim2.fromOffset(28, 16)
+    track.Position         = UDim2.new(1, -38, 0.5, -8)
+    track.BackgroundColor3 = state and c.WHITE or c.BORDER
+    track.BorderSizePixel  = 0
+    track.Parent           = row
+    Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+
+    local knob = Instance.new("Frame")
+    knob.Size             = UDim2.fromOffset(10, 10)
+    knob.Position         = state and UDim2.fromOffset(15,3) or UDim2.fromOffset(3,3)
+    knob.BackgroundColor3 = state and c.BG or c.DIM
+    knob.BorderSizePixel  = 0
+    knob.Parent           = track
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+
+    local hitbox = Instance.new("TextButton")
+    hitbox.Size             = UDim2.fromScale(1, 1)
+    hitbox.BackgroundTransparency = 1
+    hitbox.Text             = ""
+    hitbox.Parent           = row
+
+    hitbox.MouseButton1Click:Connect(function()
+        state    = not state
+        cfg[key] = state
+        tween(track, {BackgroundColor3 = state and c.WHITE or c.BORDER}, 0.15)
+        tween(knob,  {Position = state and UDim2.fromOffset(15,3) or UDim2.fromOffset(3,3), BackgroundColor3 = state and c.BG or c.DIM}, 0.15)
+        if callback then callback(state) end
+    end)
+    hitbox.MouseEnter:Connect(function() tween(row, {BackgroundColor3 = c.HOVER}, 0.12) end)
+    hitbox.MouseLeave:Connect(function() tween(row, {BackgroundColor3 = c.PANEL}, 0.12) end)
+end
+
+local function slider(parent, label, key, minval, maxval, isfloat, callback)
+    local row = Instance.new("Frame")
+    row.Size             = UDim2.new(1, 0, 0, 44)
+    row.BackgroundColor3 = c.PANEL
+    row.BorderSizePixel  = 0
+    row.Parent           = parent
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 5)
+    local rs = Instance.new("UIStroke")
+    rs.Color = c.BORDER; rs.Thickness = 1; rs.Parent = row
+
+    local function fmt(v)
+        return isfloat and string.format("%.2f", v) or tostring(v)
+    end
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size                = UDim2.new(1, -55, 0, 18)
+    lbl.Position            = UDim2.fromOffset(10, 5)
+    lbl.BackgroundTransparency = 1
+    lbl.Text                = label
+    lbl.TextColor3          = c.TEXT
+    lbl.TextSize            = 11
+    lbl.Font                = Enum.Font.Gotham
+    lbl.TextXAlignment      = Enum.TextXAlignment.Left
+    lbl.Parent              = row
+
+    local vallbl = Instance.new("TextLabel")
+    vallbl.Size                = UDim2.fromOffset(45, 18)
+    vallbl.Position            = UDim2.new(1, -52, 0, 5)
+    vallbl.BackgroundTransparency = 1
+    vallbl.Text                = fmt(cfg[key])
+    vallbl.TextColor3          = c.DIM
+    vallbl.TextSize            = 10
+    vallbl.Font                = Enum.Font.Gotham
+    vallbl.TextXAlignment      = Enum.TextXAlignment.Right
+    vallbl.Parent              = row
+
+    local trackbg = Instance.new("Frame")
+    trackbg.Size             = UDim2.new(1, -20, 0, 3)
+    trackbg.Position         = UDim2.new(0, 10, 0, 30)
+    trackbg.BackgroundColor3 = c.BORDER
+    trackbg.BorderSizePixel  = 0
+    trackbg.Parent           = row
+    Instance.new("UICorner", trackbg).CornerRadius = UDim.new(1, 0)
+
+    local fillbar = Instance.new("Frame")
+    fillbar.Size             = UDim2.fromScale((cfg[key] - minval) / (maxval - minval), 1)
+    fillbar.BackgroundColor3 = c.TEXT
+    fillbar.BorderSizePixel  = 0
+    fillbar.Parent           = trackbg
+    Instance.new("UICorner", fillbar).CornerRadius = UDim.new(1, 0)
+
+    local dragging = false
+    local function updatefromx(absx)
+        local pct = math.clamp((absx - trackbg.AbsolutePosition.X) / trackbg.AbsoluteSize.X, 0, 1)
+        local val
+        if isfloat then
+            val = math.floor((minval + (maxval - minval) * pct) * 100 + 0.5) / 100
+        else
+            val = math.floor(minval + (maxval - minval) * pct)
+        end
+        cfg[key]      = val
+        fillbar.Size  = UDim2.fromScale(pct, 1)
+        vallbl.Text   = fmt(val)
+        if callback then callback(val) end
+    end
+
+    trackbg.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true; updatefromx(i.Position.X) end
+    end)
+    UIS.InputChanged:Connect(function(i)
+        if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then updatefromx(i.Position.X) end
+    end)
+    UIS.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+    row.MouseEnter:Connect(function() tween(row, {BackgroundColor3 = c.HOVER}, 0.12) end)
+    row.MouseLeave:Connect(function() tween(row, {BackgroundColor3 = c.PANEL}, 0.12) end)
+end
+
+local vistab     = tab("visuals", 1)
+local aimtab     = tab("aimbot",  2)
+local hitboxtab  = tab("hitbox",  3)
+
+toggle(vistab.page,  "Skeleton",         "skeleton",  nil)
+toggle(vistab.page,  "Corner Boxes",     "boxes",     nil)
+toggle(vistab.page,  "Distance",         "distance",  nil)
+toggle(vistab.page,  "Visibility Check", "visCheck",  nil)
+slider(vistab.page,  "Max Distance",     "maxDist", 50, 2000, false, nil)
+
+toggle(aimtab.page,  "Enable Aimbot",    "aimbot",    nil)
+toggle(aimtab.page,  "Show FOV Circle",  "showFOV",   nil)
+slider(aimtab.page,  "FOV Radius",       "aimbotFOV",    50, 500,  false, nil)
+slider(aimtab.page,  "Smoothness",       "aimbotSmooth", 0.05, 1,  true,  nil)
+
+toggle(hitboxtab.page, "Hitbox Expander", "hitboxExpander", function(v)
+    if v then enablehitbox() else disablehitbox() end
+end)
+toggle(hitboxtab.page, "Show Hitbox",    "hitboxVisuals",  function()
+    updatevis()
+end)
+slider(hitboxtab.page, "Hitbox Size",     "hitboxSize", 1, 15, false, function()
+    if cfg.hitboxExpander then updatesizes() end
+end)
+
+vistab.activate()
+
+UIS.InputBegan:Connect(function(i, gpe)
+    if gpe then return end
+    if i.KeyCode == Enum.KeyCode.Insert then win.Visible = not win.Visible end
+end)
