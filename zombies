@@ -659,6 +659,7 @@ end
 local vistab     = tab("visuals", 1)
 local aimtab     = tab("aimbot",  2)
 local hitboxtab  = tab("hitbox",  3)
+local playertab  = tab("player",  4)
 
 toggle(vistab.page,  "Skeleton",         "skeleton",  nil)
 toggle(vistab.page,  "Corner Boxes",     "boxes",     nil)
@@ -680,6 +681,144 @@ end)
 slider(hitboxtab.page, "Hitbox Size",     "hitboxSize", 1, 15, false, function()
     if cfg.hitboxExpander then updatesizes() end
 end)
+
+cfg.walkSpeed = 16
+cfg.jumpPower = 50
+cfg.infJump   = false
+cfg.noclip    = false
+cfg.fly       = false
+cfg.flySpeed  = 50
+
+local function gethum() local c = LocalPlayer.Character return c and c:FindFirstChildOfClass("Humanoid") end
+local function gethrp() local c = LocalPlayer.Character return c and c:FindFirstChild("HumanoidRootPart") end
+
+local speedConn
+
+local function stopSpeed()
+    if speedConn then speedConn:Disconnect(); speedConn = nil end
+end
+
+local function startSpeed()
+    stopSpeed()
+    speedConn = RunService.Heartbeat:Connect(function(dt)
+        if cfg.fly or not cfg.speedBoost then return end
+        local hrp = gethrp()
+        local hum = gethum()
+        if not hrp or not hum then return end
+
+        local mv = hum.MoveDirection
+        if mv.Magnitude < 0.1 then return end
+
+        local speedRatio = cfg.walkSpeed / 16
+        local baseSpeed  = 16 * dt
+        local extra      = (speedRatio - 1) * baseSpeed
+
+        hrp.CFrame = hrp.CFrame + mv * extra
+    end)
+end
+
+startSpeed()
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    if cfg.speedBoost then startSpeed() end
+end)
+
+toggle(playertab.page, "Speed Boost", "speedBoost", function(v)
+    if not v then stopSpeed() else startSpeed() end
+end)
+slider(playertab.page, "Walk Speed", "walkSpeed", 16, 200, false, nil)
+
+toggle(playertab.page, "Infinite Jump", "infJump", nil)
+UIS.JumpRequest:Connect(function()
+    if cfg.infJump then
+        local hum = gethum()
+        if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+    end
+end)
+
+toggle(playertab.page, "Noclip", "noclip", nil)
+RunService.Stepped:Connect(function()
+    if cfg.noclip then
+        local c = LocalPlayer.Character
+        if c then
+            for _, p in ipairs(c:GetDescendants()) do
+                if p:IsA("BasePart") and p.CanCollide then p.CanCollide = false end
+            end
+        end
+    end
+end)
+
+local flyConn2
+local flyV     = Vector3.zero
+local flyActive = false
+
+local function stopfly()
+    flyActive = false
+    if flyConn2 then flyConn2:Disconnect(); flyConn2 = nil end
+    flyV = Vector3.zero
+    local hum = gethum()
+    local hrp = gethrp()
+    if hum then
+        hum.PlatformStand = false
+        hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+    end
+    if hrp then
+        hrp.AssemblyLinearVelocity  = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
+    end
+end
+
+local function startfly()
+    stopfly()
+    local hrp = gethrp()
+    local hum = gethum()
+    if not hrp or not hum then return end
+    flyActive = true
+
+    pcall(function() hrp:SetNetworkOwner(LocalPlayer) end)
+
+    flyConn2 = RunService.RenderStepped:Connect(function(dt)
+        if not flyActive then return end
+        local hrp2 = gethrp()
+        local hum2 = gethum()
+        if not hrp2 or not hum2 then stopfly(); return end
+
+        hum2.PlatformStand = false
+        hrp2.AssemblyLinearVelocity  = Vector3.zero
+        hrp2.AssemblyAngularVelocity = Vector3.zero
+
+        local cf    = Camera.CFrame
+        local input = Vector3.zero
+
+        if UIS:IsKeyDown(Enum.KeyCode.W) then input += cf.LookVector end
+        if UIS:IsKeyDown(Enum.KeyCode.S) then input -= cf.LookVector end
+        if UIS:IsKeyDown(Enum.KeyCode.A) then input -= cf.RightVector end
+        if UIS:IsKeyDown(Enum.KeyCode.D) then input += cf.RightVector end
+        if UIS:IsKeyDown(Enum.KeyCode.Space)     then input += Vector3.new(0, 1, 0) end
+        if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then input -= Vector3.new(0, 1, 0) end
+
+        local target = (input.Magnitude > 0 and input.Unit or Vector3.zero) * cfg.flySpeed
+        flyV = flyV:Lerp(target, math.min(1, dt * 10))
+
+        hrp2.CFrame = CFrame.new(hrp2.CFrame.Position + flyV * dt)
+            * CFrame.Angles(0, math.atan2(-cf.LookVector.X, -cf.LookVector.Z), 0)
+
+        local c = LocalPlayer.Character
+        if c then
+            for _, p in ipairs(c:GetDescendants()) do
+                if p:IsA("BasePart") and p ~= hrp2 then
+                    p.CanCollide = false
+                end
+            end
+        end
+    end)
+end
+
+toggle(playertab.page, "Fly", "fly", function(v)
+    if v then startfly() else stopfly() end
+end)
+
+slider(playertab.page, "Fly Speed", "flySpeed", 10, 2000, false, nil)
 
 vistab.activate()
 
